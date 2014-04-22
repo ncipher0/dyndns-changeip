@@ -1,0 +1,143 @@
+#!/bin/bash
+
+#################################################################
+## ChangeIP.com bash update script                             ##
+#################################################################
+## Written 3/18/09 by Tom Rinker, released to the Public Domain##
+##                                                             ##
+## Rewritten 2011-10-20 by David Hayes                         ##
+## Offered under the Apache License 2.0                        ##
+#################################################################
+
+
+########################################
+###
+### Customize the variables here for your
+### individual installation.
+###
+########################################
+
+## How to log in to ChangeIP.com,
+## and what to change when we get there.
+##
+## Non-working default values are given here.
+## You should replace these with your own values.
+## These values can be overridden from the environment for testing.
+#
+: ${DYNIPUSER=my_changeip_name}
+: ${DYNIPPASS=my_changeip_password}
+: ${DYNIPDOMAIN=my_changeip_domain}
+: ${DYNIPSET=1}
+
+## Default gateway router.  
+## We try to discover automatically.
+## This is a backup measure.
+#
+: ${DEFRTR=192.168.1.1}
+
+## We report our results to syslog.
+## These set how the logs are labeled.
+#
+TAG=dyndns-changeip
+FAC=daemon
+
+## An external public DNS server.  We use this
+## to determine how the outside world sees our
+## DNS name and IP address.  Do not point this
+## to your own internal name server, which may
+## be providing different results.  This is 
+## particularly true if you're using DNSMASQ.
+##
+## This is one of Google's public DNS servers.
+#
+: ${EXTERN:=8.8.4.4}
+
+
+## The control URLs are documented at
+## http://www.changeip.com/clients.asp#Specs
+#
+URLCHK=http://ip.changeip.com
+URLUPD=https://nic.changeip.com/nic/update
+
+
+## Functions used later
+
+dolog () {
+  LVL=$1
+  shift
+  MSG="$@"
+  logger -p $FAC.error "$TAG: [$LVL] $MSG"
+  echo "$TAG: [$LVL] $MSG" >&2
+}
+
+
+## Check command options
+FORCE=
+while getopts :f OPTCHAR; do
+  case "$OPTCHAR" in
+    f)	FORCE=1
+	break;
+	;;
+
+    *)	echo usage: `basename $0` '[-f]' >&2
+	exit 1;
+  esac
+done
+
+## get current public IP from our DD-WRT router status page
+RTR=`/sbin/ip route list table main |
+       sed -n -e '/^default/ { s/.*via \([0-9.]*\) .*/\1/; p }'`
+RTR="${RTR:-$DEFRTR}"
+
+if [ -z "$RTR" ]; then
+    dolog error no default router
+    exit 1
+fi
+
+CURRIP=`curl -s http://$RTR/ |
+	  fgrep ipinfo |
+          tr -cd 0123456789.`
+
+## get last registered IP from DNS.  Check the external nameserver because
+## we may modify some addresses internal to our own net.
+host -t A $DYNIPDOMAIN $EXTERN >/dev/null
+sleep 5
+DNSIP=`host -t A $DYNIPDOMAIN $EXTERN |
+	 fgrep ' has address ' |
+	 egrep -o '[0-9.]*$'`
+
+## Check some basic error conditions.
+if [ -z "$CURRIP" ]; then
+    dolog error current IP missing
+    exit 2
+elif [ -z "$DNSIP" ]; then
+    dolog warn missing IP from DNS $DYNIPDOMAIN
+    # Do not exit, this is only a warning.
+fi
+
+## Compare the old and new IPs. Update if necessary or just log
+## that we checked
+
+if [ -z "$FORCE" -a "$DNSIP" = "$CURRIP" ]; then
+
+    # IP has not changed.  No update.
+    dolog info stable $DYNIPDOMAIN addr $CURRIP
+
+else
+
+    # Register the new IP
+    REASON=${FORCE:+forced}
+    REASON=${REASON:-changed}
+    dolog notice $REASON $DYNIPDOMAIN addr $CURRIP
+
+    if curl -k -s -o /dev/null -u "${DYNIPUSER}:${DYNIPPASS}" \
+	"${URLUPD}?hostname=${DYNIPDOMAIN}&myip=${CURRIP}&set=${DYNIPSET}" ; then
+	true;
+    else
+        dolog error updating $DYNIPDOMAIN addr $CURRIP
+        exit 4
+    fi
+
+fi
+
+exit 0
