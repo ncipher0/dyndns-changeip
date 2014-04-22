@@ -71,7 +71,9 @@ dolog () {
 }
 
 
+##############################
 ## Check command options
+#
 FORCE=
 while getopts :f OPTCHAR; do
   case "$OPTCHAR" in
@@ -84,7 +86,14 @@ while getopts :f OPTCHAR; do
   esac
 done
 
-## get current public IP from our DD-WRT router status page
+##############################
+## Find our default router.  Assume it is based on
+## DD-WRT and try to get our public (WAN) IP address
+## from the main status page of the router.  If we can't get
+## our WAN IP from our own router, try to query it from
+## the public IP responder at ChangeIP.
+
+# Get our default router from the Linux kernel IP routes
 RTR=`/sbin/ip route list table main |
        sed -n -e '/^default/ { s/.*via \([0-9.]*\) .*/\1/; p }'`
 RTR="${RTR:-$DEFRTR}"
@@ -94,21 +103,40 @@ if [ -z "$RTR" ]; then
     exit 1
 fi
 
+## get current public IP from our DD-WRT router status page
 CURRIP=`curl -s http://$RTR/ |
 	  fgrep ipinfo |
           tr -cd 0123456789.`
 
-## get last registered IP from DNS.  Check the external nameserver because
-## we may modify some addresses internal to our own net.
+## If we didn't get an IP from our own WiFi router/AP,
+## ask ChangeIP.  
+if [ x"$CURRIP" = x ]; then
+    CURRIP=`curl -s $URLCHK | head -1`
+fi
+
+##############################
+## Get our last registered IP address in DNS.  We do this so
+## we can avoid doing an update on our dyndns provider if our
+## IP address hasn't changed.
+## Check the external nameserver because we may modify some 
+## addresses internal to our own net.
+#
+
+# Ask and then sleep.  This is pump-priming because the first
+# response may take a while to find the authoritative servers.
 host -t A $DYNIPDOMAIN $EXTERN >/dev/null
 sleep 5
+
+# Now ask again, and keep the answer.
 DNSIP=`host -t A $DYNIPDOMAIN $EXTERN |
 	 fgrep ' has address ' |
 	 egrep -o '[0-9.]*$'`
 
+##############################
 ## Check some basic error conditions.
+#
 if [ -z "$CURRIP" ]; then
-    dolog error current IP missing
+    dolog warn current IP missing
     exit 2
 elif [ -z "$DNSIP" ]; then
     dolog warn missing IP from DNS $DYNIPDOMAIN
@@ -117,7 +145,7 @@ fi
 
 ## Compare the old and new IPs. Update if necessary or just log
 ## that we checked
-
+#
 if [ -z "$FORCE" -a "$DNSIP" = "$CURRIP" ]; then
 
     # IP has not changed.  No update.
@@ -130,6 +158,7 @@ else
     REASON=${REASON:-changed}
     dolog notice $REASON $DYNIPDOMAIN addr $CURRIP
 
+    ## Finally, do the update
     if curl -k -s -o /dev/null -u "${DYNIPUSER}:${DYNIPPASS}" \
 	"${URLUPD}?hostname=${DYNIPDOMAIN}&myip=${CURRIP}&set=${DYNIPSET}" ; then
 	true;
